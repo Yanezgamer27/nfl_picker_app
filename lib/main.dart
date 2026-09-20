@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   runApp(const NFLPickerApp());
@@ -37,12 +38,42 @@ class _HomeScreenState extends State<HomeScreen> {
   int currentWeek = 2;
   List<dynamic> games = [];
   Map<String, String> userPicks = {};
+  Map<int, bool> lockedWeeks = {};
   bool isLoading = false;
 
   @override
   void initState() {
     super.initState();
+    loadSavedData();
+  }
+
+  Future<void> loadSavedData() async {
+    final prefs = await SharedPreferences.getInstance();
+    
+    String? picksString = prefs.getString('nfl_user_picks');
+    if (picksString != null) {
+      setState(() {
+        userPicks = Map<String, String>.from(json.decode(picksString));
+      });
+    }
+
+    String? lockedString = prefs.getString('nfl_locked_weeks');
+    if (lockedString != null) {
+      Map<String, dynamic> decoded = json.decode(lockedString);
+      setState(() {
+        lockedWeeks = decoded.map((key, value) => MapEntry(int.parse(key), value as bool));
+      });
+    }
+
     fetchESPNData();
+  }
+
+  Future<void> saveLocalData() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('nfl_user_picks', json.encode(userPicks));
+    
+    Map<String, bool> lockedToSave = lockedWeeks.map((key, value) => MapEntry(key.toString(), value));
+    await prefs.setString('nfl_locked_weeks', json.encode(lockedToSave));
   }
 
   Future<void> fetchESPNData() async {
@@ -100,7 +131,7 @@ class _HomeScreenState extends State<HomeScreen> {
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Error al obtener datos de ESPN')),
+        const SnackBar(content: Text('Error al conectar con ESPN')),
       );
     } finally {
       if (mounted) {
@@ -112,7 +143,20 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void selectWinner(String gameId, String team, bool isCompleted) {
-    if (isCompleted) return;
+    bool isWeekLocked = lockedWeeks[currentWeek] ?? false;
+    
+    if (isCompleted || isWeekLocked) {
+      if (isWeekLocked) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('🔒 Esta semana está congelada. Desbloquéala para hacer cambios.'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+      return;
+    }
+
     setState(() {
       if (userPicks[gameId] == team) {
         userPicks.remove(gameId);
@@ -120,10 +164,36 @@ class _HomeScreenState extends State<HomeScreen> {
         userPicks[gameId] = team;
       }
     });
+
+    saveLocalData();
+  }
+
+  void toggleLockWeek() {
+    bool isCurrentlyLocked = lockedWeeks[currentWeek] ?? false;
+    
+    setState(() {
+      lockedWeeks[currentWeek] = !isCurrentlyLocked;
+    });
+
+    saveLocalData();
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          !isCurrentlyLocked
+              ? '🔒 Semana $currentWeek bloqueada con éxito.'
+              : '🔓 Semana $currentWeek desbloqueada.',
+        ),
+        backgroundColor: !isCurrentlyLocked ? Colors.amber.shade900 : Colors.blueGrey,
+        duration: const Duration(seconds: 2),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
+    bool isWeekLocked = lockedWeeks[currentWeek] ?? false;
+
     int hits = 0;
     int completedPicked = 0;
 
@@ -158,7 +228,7 @@ class _HomeScreenState extends State<HomeScreen> {
             items: List.generate(18, (index) => index + 1).map((week) {
               return DropdownMenuItem<int>(
                 value: week,
-                child: Text('Semana $week'),
+                child: Text('Sem $week ${lockedWeeks[week] == true ? '🔒' : ''}'),
               );
             }).toList(),
             onChanged: (value) {
@@ -178,51 +248,77 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       body: Column(
         children: [
+          // Marcador Superior
           Container(
             margin: const EdgeInsets.all(12),
-            padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
+            padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
               color: const Color(0xFF1E293B),
               borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: Colors.white12),
+              border: Border.all(
+                color: isWeekLocked ? Colors.amber.shade700 : Colors.white12,
+                width: isWeekLocked ? 2 : 1,
+              ),
             ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceAround,
+            child: Column(
               children: [
-                Column(
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceAround,
                   children: [
-                    const Text('ACIERTOS SEMANA',
-                        style: TextStyle(
-                            color: Colors.grey,
-                            fontSize: 10,
-                            fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 4),
-                    Text('$hits / $completedPicked',
-                        style: const TextStyle(
-                            color: Colors.lightGreenAccent,
-                            fontSize: 20,
-                            fontWeight: FontWeight.bold)),
+                    Column(
+                      children: [
+                        const Text('ACIERTOS',
+                            style: TextStyle(color: Colors.grey, fontSize: 10, fontWeight: FontWeight.bold)),
+                        const SizedBox(height: 4),
+                        Text('$hits / $completedPicked',
+                            style: const TextStyle(
+                                color: Colors.greenAccent,
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold)),
+                      ],
+                    ),
+                    Container(height: 30, width: 1, color: Colors.white24),
+                    Column(
+                      children: [
+                        const Text('EFECTIVIDAD',
+                            style: TextStyle(color: Colors.grey, fontSize: 10, fontWeight: FontWeight.bold)),
+                        const SizedBox(height: 4),
+                        Text('$accuracy%',
+                            style: const TextStyle(
+                                color: Colors.amber,
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold)),
+                      ],
+                    ),
                   ],
                 ),
-                Container(height: 30, width: 1, color: Colors.white24),
-                Column(
-                  children: [
-                    const Text('EFECTIVIDAD',
-                        style: TextStyle(
-                            color: Colors.grey,
-                            fontSize: 10,
-                            fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 4),
-                    Text('$accuracy%',
-                        style: const TextStyle(
-                            color: Colors.amber,
-                            fontSize: 20,
-                            fontWeight: FontWeight.bold)),
-                  ],
+                const SizedBox(height: 12),
+                const Divider(color: Colors.white12, height: 1),
+                const SizedBox(height: 8),
+                
+                // Botón para Congelar / Desbloquear
+                ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: isWeekLocked ? Colors.amber : const Color(0xFF0F172A),
+                    foregroundColor: isWeekLocked ? Colors.black : Colors.amber,
+                    side: const BorderSide(color: Colors.amber),
+                    minimumSize: const Size(double.infinity, 40),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  ),
+                  onPressed: toggleLockWeek,
+                  icon: Icon(isWeekLocked ? Icons.lock : Icons.lock_open, size: 18),
+                  label: Text(
+                    isWeekLocked
+                        ? 'PRONÓSTICOS CONGELADOS (Toca para editar)'
+                        : 'BLOQUEAR MIS PRONÓSTICOS',
+                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                  ),
                 ),
               ],
             ),
           ),
+
+          // Lista de Partidos
           Expanded(
             child: isLoading
                 ? const Center(
@@ -236,19 +332,17 @@ class _HomeScreenState extends State<HomeScreen> {
                       final selected = userPicks[gameId];
                       final isCompleted = game['isCompleted'] as bool;
                       final isHit = isCompleted && selected == game['winner'];
-                      final isMiss = isCompleted &&
-                          selected != null &&
-                          selected != game['winner'];
+                      final isMiss = isCompleted && selected != null && selected != game['winner'];
 
                       Color cardColor = const Color(0xFF1E293B);
                       Color borderColor = Colors.white10;
 
                       if (isHit) {
                         borderColor = Colors.green;
-                        cardColor = Colors.green.withAlpha(25);
+                        cardColor = Colors.green.withValues(alpha: 0.1);
                       } else if (isMiss) {
                         borderColor = Colors.redAccent;
-                        cardColor = Colors.redAccent.withAlpha(25);
+                        cardColor = Colors.redAccent.withValues(alpha: 0.1);
                       }
 
                       return Container(
@@ -297,6 +391,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                     role: 'VISITA',
                                     selected: selected,
                                     game: game,
+                                    isWeekLocked: isWeekLocked,
                                   ),
                                 ),
                                 const SizedBox(width: 8),
@@ -308,6 +403,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                     role: 'LOCAL',
                                     selected: selected,
                                     game: game,
+                                    isWeekLocked: isWeekLocked,
                                   ),
                                 ),
                               ],
@@ -330,6 +426,7 @@ class _HomeScreenState extends State<HomeScreen> {
     required String role,
     required String? selected,
     required dynamic game,
+    required bool isWeekLocked,
   }) {
     bool isSelected = selected == team;
     bool isCompleted = game['isCompleted'];
@@ -346,7 +443,7 @@ class _HomeScreenState extends State<HomeScreen> {
         btnColor = Colors.redAccent;
         textColor = Colors.white;
       } else if (isWinner) {
-        btnColor = Colors.green.withAlpha(75);
+        btnColor = Colors.green.withValues(alpha: 0.3);
       } else {
         btnColor = Colors.black26;
         textColor = Colors.grey;
@@ -368,11 +465,8 @@ class _HomeScreenState extends State<HomeScreen> {
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           Text('$team ($score)',
-              style:
-                  const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-          Text(role,
-              style: TextStyle(
-                  fontSize: 9, color: textColor.withAlpha(180))),
+              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+          Text(role, style: const TextStyle(color: Colors.white70, fontSize: 9)),
         ],
       ),
     );
